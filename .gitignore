@@ -1,0 +1,5 @@
+backend.tfvars
+.terraform*
+terraform.tfstate*
+terraform.tfvars
+*.pem

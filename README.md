@@ -8,7 +8,6 @@
 This module will setup hashicorp vault in private EC2 in private subnet with a load balancer url. Backup of vault will be present in s3 bucket as provided in vault.hcl file under script folder. Tfstate will be stored in S3 bucket as provided in backend.tf
 
 
-
 ## Usage
  - This module has script folder which you can edit according to need
  - vault.service - To run vault as ubuntu service

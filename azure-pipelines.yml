@@ -1,23 +1,167 @@
-# Starter pipeline
-- task: ContainerBuild@0
-  inputs:
-    Dockerfile: 'Dockerfile'
+# Azure Pipelines YAML file to build and deploy.
 
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+# Override the build identifier. This can be accessed using $(Build.BuildNumber).
+name: $(Date:yyyy)$(Date:MM).$(Date:dd)$(Rev:.rr)
 
+# The GitHub branches to trigger on.
 trigger:
-- main
+  - Development
+  - master
 
-pool:
-  vmImage: ubuntu-latest
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: stratumfive/azure-pipeline-templates
+      endpoint: StratumFive
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+variables:
+  - group: NuGet
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+  - name: BranchNameForDev
+    value: refs/heads/Development
+  - name: BranchNameForProd
+    value: refs/heads/master
+
+  - name: Api.Helm.ChartName
+    value: ihs-data-service
+  - name: Api.Helm.ValuesFile
+    value: api-values.release.yaml
+  - name: Api.Helm.Folder
+    value: helm
+  - name: Api.K8S.Namespace
+    value: aviso
+  - name: Api.K8S.RepositoryName
+    value: ihsdataservice
+  - name: Api.K8S.ReleaseName
+    value: ihsdataservice-api
+
+
+# The server in unit 12.
+pool: 'unit-12-mk2'
+
+stages:
+  - stage: Build
+    displayName: Build stage
+    jobs:
+      - job: Docker
+        displayName: Build
+        steps:
+          # Create the nuget.config file.
+          - template: nuget/create-nuget-config.yml@templates
+            parameters:
+              # Require the write NuGet token to push the Customer Data Store library NuGet package.
+              nugetPersonalAccessToken: $(NuGet-PAT-Write)
+              targetDirectory: ./
+
+          # Build the docker images using docker-compose. This will run the relevant tests as detailed in the Dockerfiles.
+          - task: DockerCompose@0
+            displayName: 'docker-compose build'
+            inputs:
+              action: 'Build services'
+              containerregistrytype: 'Container Registry'
+              dockerComposeFile: 'docker-compose.yml'
+              additionalImageTags: '$(Build.BuildNumber)'
+              includeLatestTag: true
+
+          - task: ECRPushImage@1
+            displayName: 'Push API docker image to AWS Dev'
+            inputs:
+              awsCredentials: 'awsdev'
+              regionName: 'us-east-1'
+              sourceImageName: '$(Api.K8S.RepositoryName)'
+              sourceImageTag: '$(Build.BuildNumber)'
+              repositoryName: '$(Api.K8S.RepositoryName)'
+              pushTag: '$(Build.BuildNumber)'
+              autoCreateRepository: true
+            condition: and(succeeded(), eq(variables['Build.SourceBranch'], variables['BranchNameForDev']))
+
+          - task: ECRPushImage@1
+            displayName: 'Push API docker image to AWS Prod'
+            inputs:
+              awsCredentials: 'awsprd'
+              regionName: 'us-east-1'
+              sourceImageName: '$(Api.K8S.RepositoryName)'
+              sourceImageTag: '$(Build.BuildNumber)'
+              repositoryName: '$(Api.K8S.RepositoryName)'
+              pushTag: '$(Build.BuildNumber)'
+              autoCreateRepository: true
+            condition: and(succeeded(), eq(variables['Build.SourceBranch'], variables['BranchNameForProd']))
+         
+          # Package the helm chart and publish the helm artifacts for the deploy stages.
+          # API.
+          - template: helm/package-and-publish-pipeline-artifacts.yml@templates
+            parameters:
+              chartName: $(Api.Helm.ChartName)
+              helmDir: $(Api.Helm.Folder)
+              valuesFileDir: $(Api.Helm.Folder)
+              valuesFileName: $(Api.Helm.ValuesFile)
+
+  - stage: DeployToDEV
+    displayName: Deploy to DEV stage
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], variables['BranchNameForDev']))
+    variables:
+      - group: aurora-connection-strings-dev
+      - group: aws-s3-readonly-dev
+      - group: aviso-dev-cluster-k8s
+      - name: AwsOptions.Key
+        value: $(AwsOptions.Key.Dev)
+      - name: AwsOptions.Secret
+        value: $(AwsOptions.Secret.Dev)
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy to DEV
+        environment: DEV
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Deploy API.
+                - template: helm/deploy.yml@templates
+                  parameters:
+                    chartName: $(Api.Helm.ChartName)
+                    valuesFileName: $(Api.Helm.ValuesFile)
+                    dockerRegistry: '751677023881.dkr.ecr.us-east-1.amazonaws.com'
+                    # Not actually used, repository names are specified in the helm chart.
+                    dockerRepositoryName: $(Api.K8S.RepositoryName)
+                    kubernetesNamespace: '$(Api.K8S.Namespace)'
+                    kubernetesReleaseName: '$(Api.K8S.ReleaseName)'
+                    kubernetesServiceConnection: 'AWS EKS Dev'
+
+  - stage: DeployToPROD
+    displayName: Deploy to PROD stage
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], variables['BranchNameForProd']))
+    variables:
+      - group: aurora-connection-strings-prod
+      - group: aws-s3-readonly-prod
+      - group: aviso-prd-cluster-k8s
+      - group: customer-data-store-prod
+      - name: AwsOptions.Key
+        value: $(AwsOptions.Key.Prod)
+      - name: AwsOptions.Secret
+        value: $(AwsOptions.Secret.Prod)
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy to PROD
+        environment: PROD
+        workspace:
+          clean: all
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Deploy API.
+                - template: helm/deploy.yml@templates
+                  parameters:
+                    chartName: $(Api.Helm.ChartName)
+                    valuesFileName: $(Api.Helm.ValuesFile)
+                    dockerRegistry: '597095571460.dkr.ecr.us-east-1.amazonaws.com'
+                    # Not actually used, repository names are specified in the helm chart.
+                    dockerRepositoryName: $(Api.K8S.RepositoryName)
+                    kubernetesNamespace: '$(Api.K8S.Namespace)'
+                    kubernetesReleaseName: '$(Api.K8S.ReleaseName)'
+                    kubernetesServiceConnection: 'AWS EKS Prod'

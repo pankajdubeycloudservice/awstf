@@ -144,24 +144,3 @@ stages:
         value: $(AwsOptions.Key.Prod)
       - name: AwsOptions.Secret
         value: $(AwsOptions.Secret.Prod)
-    jobs:
-      - deployment: Deploy
-        displayName: Deploy to PROD
-        environment: PROD
-        workspace:
-          clean: all
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                # Deploy API.
-                - template: helm/deploy.yml@templates
-                  parameters:
-                    chartName: $(Api.Helm.ChartName)
-                    valuesFileName: $(Api.Helm.ValuesFile)
-                    dockerRegistry: '597095571460.dkr.ecr.us-east-1.amazonaws.com'
-                    # Not actually used, repository names are specified in the helm chart.
-                    dockerRepositoryName: $(Api.K8S.RepositoryName)
-                    kubernetesNamespace: '$(Api.K8S.Namespace)'
-                    kubernetesReleaseName: '$(Api.K8S.ReleaseName)'
-                    kubernetesServiceConnection: 'AWS EKS Prod'
